@@ -53,6 +53,25 @@ class Meter(object):
         """
         return -0.691 + 10.0 * np.log10(val_lin)
 
+    def calc_z(self, data):
+        """
+        Calculate the mean square of the filtered signal for each block.
+        """
+        num_channels = data.shape[1]
+        t_data = data.shape[0] / self.rate # length of the input in seconds
+        num_blocks = int(np.floor(((t_data - self.block_size) / (self.block_size * self.step))) + 1) # total number of gated blocks (see end of eq. 3)
+        j_range = np.arange(0, num_blocks) # indexed list of total blocks
+        z = np.zeros(shape=(num_channels,num_blocks)) # instantiate array - tresponse of input
+
+        for i in range(num_channels): # iterate over input channels
+            for j in j_range: # iterate over total frames
+                lower_ind = int(self.block_size * (j * self.step    ) * self.rate) # lower bound of integration (in samples)
+                upper_ind = int(self.block_size * (j * self.step + 1) * self.rate) # upper bound of integration (in samples)
+                # calculate mean square of the filtered for each block (see eq. 1)
+                z[i,j] = (1.0 / (self.block_size * self.rate)) * np.sum(np.square(data[lower_ind:upper_ind,i]))
+        return z
+
+
     def gate_loudness(self, z, lufs_blocks):
         """
         Gate the loudness of a signal (only valid for the integrated loudness)
@@ -93,23 +112,31 @@ class Meter(object):
                     lufs_integrated = self.linear2lufs(np.sum([self.ch_gains[i] * z_avg_gated[i] for i in range(num_channels)]))
         return lufs_integrated
 
+    def filter_input(self, data):
+        """
+        Apply frequency weighting filters to the input signal.
+        :param data: ndarray of shape (samples, ch) or (samples,) for mono audio.
+        :return: ndarray of shape (samples, ch) or (samples,) for mono audio.
+        """
+        input_data = data.copy()
+        if input_data.ndim == 1:
+            input_data = np.reshape(input_data, (input_data.shape[0], 1))
+
+        num_ch = input_data.shape[1]
+        # Apply frequency weighting filters - account for the acoustic response of the head and auditory system
+        for ch in range(num_ch):
+            for (_, filter_stage) in self._filters[ch].items():
+                input_data[:,ch] = filter_stage.apply_filter(input_data[:,ch])
+
+        return input_data
+
     def step_loudness(self, data):
         """
         Measure the integrated gated loudness of a signal, block by block, in RT.
         :param data: ndarray of shape (samples, ch) or (samples,) for mono audio.
         :return: LUFS: float, integrated gated loudness of the input measured in dB LUFS.
         """
-        input_data = data.copy()
-
-        if input_data.ndim == 1:
-            input_data = np.reshape(input_data, (input_data.shape[0], 1))
-
-        num_channels = input_data.shape[1]
-
-        # Apply frequency weighting filters - account for the acoustic response of the head and auditory system
-        for ch in range(num_channels):
-            for (_, filter_stage) in self._filters[ch].items():
-                input_data[:,ch] = filter_stage.apply_filter(input_data[:,ch])
+        input_data = self.filter_input(data)
 
         if self.buffer_data is None:
             self.buffer_data = input_data
@@ -120,31 +147,20 @@ class Meter(object):
         t_data = self.buffer_data.shape[0] / self.rate # length of the input in seconds
         lufs_momentary = -np.inf
         if t_data >= t_block:
-            ch_gains = self.ch_gains
-            step = self.step
-
-            num_blocks = int(np.floor(((t_data - t_block) / (t_block * step)))+1) # total number of gated blocks (see end of eq. 3)
-            j_range = np.arange(0, num_blocks) # indexed list of total blocks
-            z = np.zeros(shape=(num_channels,num_blocks)) # instantiate array - tresponse of input
-
-            for i in range(num_channels): # iterate over input channels
-                for j in j_range: # iterate over total frames
-                    lower_ind = int(t_block * (j * step    ) * self.rate) # lower bound of integration (in samples)
-                    upper_ind = int(t_block * (j * step + 1) * self.rate) # upper bound of integration (in samples)
-                    # calculate mean square of the filtered for each block (see eq. 1)
-                    z[i,j] = (1.0 / (t_block * self.rate)) * np.sum(np.square(self.buffer_data[lower_ind:upper_ind,i]))
+            z = self.calc_z(self.buffer_data) # calculate the mean square of the filtered signal for each block
+            (num_ch, num_blocks) = z.shape
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 # loudness for each jth block (see eq. 4)
-                lufs_blocks = np.array([self.linear2lufs(np.sum([ch_gains[i] * z[i,j] for i in range(num_channels)])) for j in j_range])
+                lufs_blocks = np.array([self.linear2lufs(np.sum([self.ch_gains[i] * z[i,j] for i in range(num_ch)])) for j in range(num_blocks)])
 
             self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
 
             # In theory we should only have one block per step. If not, we take the average
             lufs_momentary = np.mean(lufs_blocks)
             # advance buffer
-            self.buffer_data = self.buffer_data[int(num_blocks * t_block * step * self.rate):,:]
+            self.buffer_data = self.buffer_data[int(num_blocks * t_block * self.step * self.rate):,:]
 
         return self.lufs_integrated, lufs_momentary
 
@@ -172,41 +188,32 @@ class Meter(object):
         # integrated_loudness() in performed in the entire data array all at once,
         # hence we should reset all internal states before processing, in case we already
         # have called it before
+        util.valid_audio(data, self.rate, self.block_size)
+
         self.reset()
-        input_data = data.copy()
-        util.valid_audio(input_data, self.rate, self.block_size)
+        input_data = self.filter_input(data)
 
-        if input_data.ndim == 1:
-            input_data = np.reshape(input_data, (input_data.shape[0], 1))
-
-        num_channels = input_data.shape[1]
+        num_ch = input_data.shape[1]
         num_samples  = input_data.shape[0]
 
-        # Apply frequency weighting filters - account for the acoustic response of the head and auditory system
-        for ch in range(num_channels):
-            for (_, filter_stage) in self._filters[ch].items():
-                input_data[:,ch] = filter_stage.apply_filter(input_data[:,ch])
-
-        ch_gains = self.ch_gains
         t_block = self.block_size # 400 ms gating block standard
-        step = self.step
 
         t_data = num_samples / self.rate # length of the input in seconds
-        num_blocks = int(np.round(((t_data - t_block) / (t_block * step)))+1) # total number of gated blocks (see end of eq. 3)
+        num_blocks = int(np.round(((t_data - t_block) / (t_block * self.step)))+1) # total number of gated blocks (see end of eq. 3)
         j_range = np.arange(0, num_blocks) # indexed list of total blocks
-        z = np.zeros(shape=(num_channels,num_blocks)) # instantiate array - tresponse of input
+        z = np.zeros(shape=(num_ch,num_blocks)) # instantiate array - tresponse of input
 
-        for i in range(num_channels): # iterate over input channels
+        for i in range(num_ch): # iterate over input channels
             for j in j_range: # iterate over total frames
-                lower_ind = int(t_block * (j * step    ) * self.rate) # lower bound of integration (in samples)
-                upper_ind = int(t_block * (j * step + 1) * self.rate) # upper bound of integration (in samples)
+                lower_ind = int(t_block * (j * self.step    ) * self.rate) # lower bound of integration (in samples)
+                upper_ind = int(t_block * (j * self.step + 1) * self.rate) # upper bound of integration (in samples)
                 # calculate mean square of the filtered for each block (see eq. 1)
                 z[i,j] = (1.0 / (t_block * self.rate)) * np.sum(np.square(input_data[lower_ind:upper_ind,i]))
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             # loudness for each jth block (see eq. 4)
-            lufs_blocks = np.array([self.linear2lufs(np.sum([ch_gains[i] * z[i,j] for i in range(num_channels)])) for j in j_range])
+            lufs_blocks = np.array([self.linear2lufs(np.sum([self.ch_gains[i] * z[i,j] for i in range(num_ch)])) for j in range(num_blocks)])
 
         self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
 
