@@ -30,6 +30,7 @@ class IIRfilter(object):
         self.rate = rate
         self.filter_type = filter_type
         self.passband_gain = passband_gain
+        self.zi = np.zeros(2)
 
     def __str__(self):
         filter_info = dedent("""
@@ -56,6 +57,12 @@ class IIRfilter(object):
         _a0=self.a[0], _a1=self.a[1], _a2=self.a[2]))
 
         return filter_info
+
+    def reset(self):
+        """
+        Reset filter state variables.
+        """
+        self.zi = np.zeros(2)
 
     def generate_coefficients(self):
         """ Generates biquad filter coefficients using instance filter parameters. 
@@ -167,7 +174,8 @@ class IIRfilter(object):
         filtered_signal : ndarray
             Filtered input audio.
         """
-        return self.passband_gain * scipy.signal.lfilter(self.b, self.a, data)
+        y, self.zi = scipy.signal.lfilter(self.b, self.a, data, zi=self.zi)
+        return y * self.passband_gain
 
     @property
     def a(self):
