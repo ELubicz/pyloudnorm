@@ -53,6 +53,46 @@ class Meter(object):
         """
         return -0.691 + 10.0 * np.log10(val_lin)
 
+    def gate_loudness(self, z, lufs_blocks):
+        """
+        Gate the loudness of a signal (only valid for the integrated loudness)
+        :param lufs_blocks: ndarray of shape (blocks,) with the loudness of each block.
+        """
+        lufs_integrated = self.lufs_integrated
+        num_channels = z.shape[0]
+        # find gating block indices above absolute threshold
+        j_gated_abs = np.argwhere(lufs_blocks >= self.gamma_abs).flatten()
+        if len(j_gated_abs) > 0:
+            self.lufs_num_gated_blocks_abs += len(j_gated_abs)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                # calculate the average of z[i,j] as show in eq. 5
+                if self.z_sum_gated_abs is None:
+                    self.z_sum_gated_abs = np.sum(z[:,j_gated_abs], axis=1)
+                else:
+                    self.z_sum_gated_abs += np.sum(z[:,j_gated_abs], axis=1)
+                z_avg_gated_abs = self.z_sum_gated_abs / self.lufs_num_gated_blocks_abs
+
+            # calculate the relative threshold value (see eq. 6)
+            gamma_rel = self.linear2lufs(np.sum([self.ch_gains[i] * z_avg_gated_abs[i] for i in range(num_channels)])) - 10.0
+            # find gating block indices above relative and absolute thresholds  (end of eq. 7)
+            j_gated = np.argwhere((lufs_blocks > gamma_rel) & (lufs_blocks > self.gamma_abs)).flatten()
+            if len(j_gated) > 0:
+                self.lufs_num_gated_blocks += len(j_gated)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    # calculate the average of z[i,j] as show in eq. 7 with blocks above both thresholds
+                    if self.z_sum_gated is None:
+                        self.z_sum_gated = np.sum(z[:,j_gated], axis=1)
+                    else:
+                        self.z_sum_gated += np.sum(z[:,j_gated], axis=1)
+                    z_avg_gated = self.z_sum_gated / self.lufs_num_gated_blocks
+                # calculate final loudness gated loudness (see eq. 7)
+                with np.errstate(divide='ignore'):
+                    lufs_integrated = self.linear2lufs(np.sum([self.ch_gains[i] * z_avg_gated[i] for i in range(num_channels)]))
+        return lufs_integrated
+
     def step_loudness(self, data):
         """
         Measure the integrated gated loudness of a signal, block by block, in RT.
@@ -81,7 +121,6 @@ class Meter(object):
         lufs_momentary = -np.inf
         if t_data >= t_block:
             ch_gains = self.ch_gains
-            gamma_abs = self.gamma_abs
             step = self.step
 
             num_blocks = int(np.floor(((t_data - t_block) / (t_block * step)))+1) # total number of gated blocks (see end of eq. 3)
@@ -100,37 +139,7 @@ class Meter(object):
                 # loudness for each jth block (see eq. 4)
                 lufs_blocks = np.array([self.linear2lufs(np.sum([ch_gains[i] * z[i,j] for i in range(num_channels)])) for j in j_range])
 
-            # find gating block indices above absolute threshold
-            j_gated_abs = np.argwhere(lufs_blocks >= gamma_abs).flatten()
-            if len(j_gated_abs) > 0:
-                self.lufs_num_gated_blocks_abs += len(j_gated_abs)
-
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", category=RuntimeWarning)
-                    # calculate the average of z[i,j] as show in eq. 5
-                    if self.z_sum_gated_abs is None:
-                        self.z_sum_gated_abs = np.sum(z[:,j_gated_abs], axis=1)
-                    else:
-                        self.z_sum_gated_abs += np.sum(z[:,j_gated_abs], axis=1)
-                    z_avg_gated_abs = self.z_sum_gated_abs / self.lufs_num_gated_blocks_abs
-
-                # calculate the relative threshold value (see eq. 6)
-                gamma_rel = self.linear2lufs(np.sum([ch_gains[i] * z_avg_gated_abs[i] for i in range(num_channels)])) - 10.0
-                # find gating block indices above relative and absolute thresholds  (end of eq. 7)
-                j_gated = np.argwhere((lufs_blocks > gamma_rel) & (lufs_blocks > gamma_abs)).flatten()
-                if len(j_gated) > 0:
-                    self.lufs_num_gated_blocks += len(j_gated)
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", category=RuntimeWarning)
-                        # calculate the average of z[i,j] as show in eq. 7 with blocks above both thresholds
-                        if self.z_sum_gated is None:
-                            self.z_sum_gated = np.sum(z[:,j_gated], axis=1)
-                        else:
-                            self.z_sum_gated += np.sum(z[:,j_gated], axis=1)
-                        z_avg_gated = self.z_sum_gated / self.lufs_num_gated_blocks
-                    # calculate final loudness gated loudness (see eq. 7)
-                    with np.errstate(divide='ignore'):
-                        self.lufs_integrated = self.linear2lufs(np.sum([ch_gains[i] * z_avg_gated[i] for i in range(num_channels)]))
+            self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
 
             # In theory we should only have one block per step. If not, we take the average
             lufs_momentary = np.mean(lufs_blocks)
@@ -180,7 +189,6 @@ class Meter(object):
 
         ch_gains = self.ch_gains
         t_block = self.block_size # 400 ms gating block standard
-        gamma_abs = self.gamma_abs
         step = self.step
 
         t_data = num_samples / self.rate # length of the input in seconds
@@ -200,28 +208,9 @@ class Meter(object):
             # loudness for each jth block (see eq. 4)
             lufs_blocks = np.array([self.linear2lufs(np.sum([ch_gains[i] * z[i,j] for i in range(num_channels)])) for j in j_range])
 
-        # find gating block indices above absolute threshold
-        j_gated_abs = np.argwhere(lufs_blocks >= gamma_abs).flatten()
+        self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            # calculate the average of z[i,j] as show in eq. 5
-            z_avg_gated_abs = np.mean(z[:,j_gated_abs], axis=1)
-        # calculate the relative threshold value (see eq. 6)
-        gamma_rel = self.linear2lufs(np.sum([ch_gains[i] * z_avg_gated_abs[i] for i in range(num_channels)])) - 10.0
-
-        # find gating block indices above relative and absolute thresholds  (end of eq. 7)
-        j_gated = np.argwhere((lufs_blocks > gamma_rel) & (lufs_blocks > gamma_abs)).flatten()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            # calculate the average of z[i,j] as show in eq. 7 with blocks above both thresholds
-            z_avg_gated = np.nan_to_num(np.mean(z[:,j_gated], axis=1))
-
-        # calculate final loudness gated loudness (see eq. 7)
-        with np.errstate(divide='ignore'):
-            LUFS = self.linear2lufs(np.sum([ch_gains[i] * z_avg_gated[i] for i in range(num_channels)]))
-
-        return LUFS
+        return self.lufs_integrated
 
     @property
     def filter_class(self):
