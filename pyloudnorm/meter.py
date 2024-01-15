@@ -59,7 +59,7 @@ class Meter(object):
         """
         num_channels = data.shape[1]
         t_data = data.shape[0] / self.rate # length of the input in seconds
-        num_blocks = int(np.floor(((t_data - self.block_size) / (self.block_size * self.step))) + 1) # total number of gated blocks (see end of eq. 3)
+        num_blocks = int(np.round(((t_data - self.block_size) / (self.block_size * self.step))) + 1) # total number of gated blocks (see end of eq. 3)
         j_range = np.arange(0, num_blocks) # indexed list of total blocks
         z = np.zeros(shape=(num_channels,num_blocks)) # instantiate array - tresponse of input
 
@@ -185,30 +185,16 @@ class Meter(object):
         LUFS : float
             Integrated gated loudness of the input measured in dB LUFS.
         """
+        util.valid_audio(data, self.rate, self.block_size)
+
         # integrated_loudness() in performed in the entire data array all at once,
         # hence we should reset all internal states before processing, in case we already
         # have called it before
-        util.valid_audio(data, self.rate, self.block_size)
-
         self.reset()
         input_data = self.filter_input(data)
 
-        num_ch = input_data.shape[1]
-        num_samples  = input_data.shape[0]
-
-        t_block = self.block_size # 400 ms gating block standard
-
-        t_data = num_samples / self.rate # length of the input in seconds
-        num_blocks = int(np.round(((t_data - t_block) / (t_block * self.step)))+1) # total number of gated blocks (see end of eq. 3)
-        j_range = np.arange(0, num_blocks) # indexed list of total blocks
-        z = np.zeros(shape=(num_ch,num_blocks)) # instantiate array - tresponse of input
-
-        for i in range(num_ch): # iterate over input channels
-            for j in j_range: # iterate over total frames
-                lower_ind = int(t_block * (j * self.step    ) * self.rate) # lower bound of integration (in samples)
-                upper_ind = int(t_block * (j * self.step + 1) * self.rate) # upper bound of integration (in samples)
-                # calculate mean square of the filtered for each block (see eq. 1)
-                z[i,j] = (1.0 / (t_block * self.rate)) * np.sum(np.square(input_data[lower_ind:upper_ind,i]))
+        z = self.calc_z(input_data) # calculate the mean square of the filtered signal for each block
+        (num_ch, num_blocks) = z.shape
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
