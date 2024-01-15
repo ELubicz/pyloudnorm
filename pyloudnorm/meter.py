@@ -78,7 +78,7 @@ class Meter(object):
 
         t_block = self.block_size # 400 ms gating block standard
         t_data = self.buffer_data.shape[0] / self.rate # length of the input in seconds
-
+        lufs_momentary = -np.inf
         if t_data >= t_block:
             ch_gains = self.ch_gains
             gamma_abs = self.gamma_abs
@@ -113,12 +113,11 @@ class Meter(object):
                     else:
                         self.z_sum_gated_abs += np.sum(z[:,j_gated_abs], axis=1)
                     z_avg_gated_abs = self.z_sum_gated_abs / self.lufs_num_gated_blocks_abs
+
                 # calculate the relative threshold value (see eq. 6)
                 gamma_rel = self.linear2lufs(np.sum([ch_gains[i] * z_avg_gated_abs[i] for i in range(num_channels)])) - 10.0
-
                 # find gating block indices above relative and absolute thresholds  (end of eq. 7)
                 j_gated = np.argwhere((lufs_blocks > gamma_rel) & (lufs_blocks > gamma_abs)).flatten()
-
                 if len(j_gated) > 0:
                     self.lufs_num_gated_blocks += len(j_gated)
                     with warnings.catch_warnings():
@@ -129,14 +128,16 @@ class Meter(object):
                         else:
                             self.z_sum_gated += np.sum(z[:,j_gated], axis=1)
                         z_avg_gated = self.z_sum_gated / self.lufs_num_gated_blocks
-
                     # calculate final loudness gated loudness (see eq. 7)
                     with np.errstate(divide='ignore'):
                         self.lufs_integrated = self.linear2lufs(np.sum([ch_gains[i] * z_avg_gated[i] for i in range(num_channels)]))
 
+            # In theory we should only have one block per step. If not, we take the average
+            lufs_momentary = np.mean(lufs_blocks)
             # advance buffer
             self.buffer_data = self.buffer_data[int(num_blocks * t_block * step * self.rate):,:]
-        return self.lufs_integrated
+
+        return self.lufs_integrated, lufs_momentary
 
     def integrated_loudness(self, data):
         """ Measure the integrated gated loudness of a signal.
