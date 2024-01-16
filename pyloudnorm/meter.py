@@ -71,6 +71,17 @@ class Meter(object):
                 z[i,j] = (1.0 / (self.block_size * self.rate)) * np.sum(np.square(data[lower_ind:upper_ind,i]))
         return z
 
+    def calc_lufs_blocks(self, z):
+        """
+        Calculate the loudness for each block (see eq. 4).
+        """
+        lufs_blocks = None
+        with warnings.catch_warnings():
+            (num_ch, num_blocks) = z.shape
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            # loudness for each jth block (see eq. 4)
+            lufs_blocks = np.array([self.linear2lufs(np.sum([self.ch_gains[i] * z[i,j] for i in range(num_ch)])) for j in range(num_blocks)])
+        return lufs_blocks
 
     def gate_loudness(self, z, lufs_blocks):
         """
@@ -145,24 +156,29 @@ class Meter(object):
 
         t_block = self.block_size # 400 ms gating block standard
         t_data = self.buffer_data.shape[0] / self.rate # length of the input in seconds
-        lufs_momentary = -np.inf
+
         if t_data >= t_block:
             z = self.calc_z(self.buffer_data) # calculate the mean square of the filtered signal for each block
-            (num_ch, num_blocks) = z.shape
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=RuntimeWarning)
-                # loudness for each jth block (see eq. 4)
-                lufs_blocks = np.array([self.linear2lufs(np.sum([self.ch_gains[i] * z[i,j] for i in range(num_ch)])) for j in range(num_blocks)])
-
-            self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
-
+            (_, num_blocks) = z.shape
+            lufs_blocks = self.calc_lufs_blocks(z) # calculate the loudness for each block (see eq. 4)
             # In theory we should only have one block per step. If not, we take the average
             lufs_momentary = np.mean(lufs_blocks)
+            self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
             # advance buffer
             self.buffer_data = self.buffer_data[int(num_blocks * t_block * self.step * self.rate):,:]
+        else:
+            # Add trailing zeros to the input data to make it a full 0.4s block
+            trailing_zeros = np.zeros(shape=(int(self.block_size * self.rate) - self.buffer_data.shape[0], self.buffer_data.shape[1]))
+            input_data = np.append(trailing_zeros, self.buffer_data, axis=0)
+            z = self.calc_z(input_data) # calculate the mean square of the filtered signal for each block
+            (_, num_blocks) = z.shape
+            lufs_blocks = self.calc_lufs_blocks(z) # calculate the loudness for each block (see eq. 4)
+            # Keeping the mean calculation for consistency, though here we surely only have one block
+            lufs_momentary = np.mean(lufs_blocks)
+            # Integrated loudness left out if the block is not full
 
-        return self.lufs_integrated, lufs_momentary
+
+        return (self.lufs_integrated, lufs_momentary)
 
     def integrated_loudness(self, data):
         """ Measure the integrated gated loudness of a signal.
@@ -192,15 +208,8 @@ class Meter(object):
         # have called it before
         self.reset()
         input_data = self.filter_input(data)
-
         z = self.calc_z(input_data) # calculate the mean square of the filtered signal for each block
-        (num_ch, num_blocks) = z.shape
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            # loudness for each jth block (see eq. 4)
-            lufs_blocks = np.array([self.linear2lufs(np.sum([self.ch_gains[i] * z[i,j] for i in range(num_ch)])) for j in range(num_blocks)])
-
+        lufs_blocks = self.calc_lufs_blocks(z) # calculate the loudness for each block (see eq. 4)
         self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
 
         return self.lufs_integrated
@@ -242,25 +251,3 @@ class Meter(object):
         else:
             raise ValueError("Invalid filter class:", self._filter_class)
 
-if __name__ == "__main__":
-    import argparse
-    import soundfile as sf
-
-    from pathlib import Path
-
-    parser = argparse.ArgumentParser(description="Measure the integrated loudness of a signal.")
-    parser.add_argument("-i","--input_file", help="Path to input file.", required=True)
-    parser.add_argument("-f", "--filter_class", help="Frequency weighting filter class.", default="K-weighting")
-    parser.add_argument("-b", "--block_size", help="Gating block size in seconds.", default=0.400, type=float)
-    args = parser.parse_args()
-
-    if Path(args.input_file).is_absolute():
-        input_file = Path(args.input_file)
-    else:
-        curr_dir = Path(__file__).parent
-        input_file = curr_dir / args.input_file
-
-    data, rate = sf.read(input_file)
-    meter = Meter(rate, args.filter_class, args.block_size)
-    LUFS = meter.integrated_loudness(data)
-    print("Integrated loudness:", LUFS, "LUFS")
