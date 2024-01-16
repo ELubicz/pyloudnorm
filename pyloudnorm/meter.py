@@ -31,18 +31,29 @@ class Meter(object):
         self.gamma_abs = -70.0 # -70 LKFS = absolute loudness threshold
         self.overlap = 0.75 # overlap of 75% of the block duration
         self.step = 1.0 - self.overlap # step size by percentage
-        self.reset()
+        # integrated loudness
+        self.lufs_i_buffer = None
+        self.lufs_i = self.gamma_abs
+        self.lufs_i_z_sum_gated_abs = None
+        self.lufs_i_z_sum_gated = None
+        self.lufs_i_num_gated_blocks_abs = 0
+        self.lufs_i_num_gated_blocks = 0
+        # short loudness
+        self.lufs_s = -np.inf
+        self.lufs_s_num_samples = 3 * self.rate # 3 seconds of audio
+        self.lufs_s_buffer = None
 
     def reset(self):
         """ 
         Reset the meter to its initial state.
         """
-        self.buffer_data = None
-        self.z_sum_gated_abs = None
-        self.z_sum_gated = None
-        self.lufs_integrated = self.gamma_abs
-        self.lufs_num_gated_blocks_abs = 0
-        self.lufs_num_gated_blocks = 0
+        self.lufs_i_buffer = None
+        self.lufs_i = self.gamma_abs
+        self.lufs_i_z_sum_gated_abs = None
+        self.lufs_i_z_sum_gated = None
+        self.lufs_i_num_gated_blocks_abs = 0
+        self.lufs_i_num_gated_blocks = 0
+        # reset filter states
         for filter_ch in self._filters:
             for (_, filter_stage) in filter_ch.items():
                 filter_stage.reset()
@@ -53,22 +64,35 @@ class Meter(object):
         """
         return -0.691 + 10.0 * np.log10(val_lin)
 
+    def calc_z_one_block(self, data):
+        """
+        Calculate the mean square of the data signal as a single block, on each channel.
+        """
+        num_channels = data.shape[1]
+        z = np.zeros(shape=(num_channels,1)) # Instantiate array. Shape to be consistent with calc_z
+        for i in range(num_channels): # iterate over input channels
+            # calculate mean square of the filtered for each block (see eq. 1)
+            z[i,:] = np.mean((np.square(data[:,i])))
+        return z
+
     def calc_z(self, data):
         """
-        Calculate the mean square of the filtered signal for each block.
+        Calculate the mean square of the data signal for each sliding block, on each channel.
         """
         num_channels = data.shape[1]
         t_data = data.shape[0] / self.rate # length of the input in seconds
-        num_blocks = int(np.round(((t_data - self.block_size) / (self.block_size * self.step))) + 1) # total number of gated blocks (see end of eq. 3)
+        # Total number of gated blocks (see end of eq. 3)
+        num_blocks = int(np.round(((t_data - self.block_size) / (self.block_size * self.step))) + 1)
         j_range = np.arange(0, num_blocks) # indexed list of total blocks
-        z = np.zeros(shape=(num_channels,num_blocks)) # instantiate array - tresponse of input
+        z = np.zeros(shape=(num_channels,num_blocks)) # instantiate array
 
         for i in range(num_channels): # iterate over input channels
             for j in j_range: # iterate over total frames
-                lower_ind = int(self.block_size * (j * self.step    ) * self.rate) # lower bound of integration (in samples)
-                upper_ind = int(self.block_size * (j * self.step + 1) * self.rate) # upper bound of integration (in samples)
+                # lower and upper bounds of integration (in samples)
+                lower_ind = int(self.block_size * (j * self.step    ) * self.rate)
+                upper_ind = int(self.block_size * (j * self.step + 1) * self.rate)
                 # calculate mean square of the filtered for each block (see eq. 1)
-                z[i,j] = (1.0 / (self.block_size * self.rate)) * np.sum(np.square(data[lower_ind:upper_ind,i]))
+                z[i,j] = np.mean(np.square(data[lower_ind:upper_ind,i]))
         return z
 
     def calc_lufs_blocks(self, z):
@@ -88,36 +112,36 @@ class Meter(object):
         Gate the loudness of a signal (only valid for the integrated loudness)
         :param lufs_blocks: ndarray of shape (blocks,) with the loudness of each block.
         """
-        lufs_integrated = self.lufs_integrated
+        lufs_integrated = self.lufs_i
         num_channels = z.shape[0]
         # find gating block indices above absolute threshold
         j_gated_abs = np.argwhere(lufs_blocks >= self.gamma_abs).flatten()
         if len(j_gated_abs) > 0:
-            self.lufs_num_gated_blocks_abs += len(j_gated_abs)
+            self.lufs_i_num_gated_blocks_abs += len(j_gated_abs)
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 # calculate the average of z[i,j] as show in eq. 5
-                if self.z_sum_gated_abs is None:
-                    self.z_sum_gated_abs = np.sum(z[:,j_gated_abs], axis=1)
+                if self.lufs_i_z_sum_gated_abs is None:
+                    self.lufs_i_z_sum_gated_abs = np.sum(z[:,j_gated_abs], axis=1)
                 else:
-                    self.z_sum_gated_abs += np.sum(z[:,j_gated_abs], axis=1)
-                z_avg_gated_abs = self.z_sum_gated_abs / self.lufs_num_gated_blocks_abs
+                    self.lufs_i_z_sum_gated_abs += np.sum(z[:,j_gated_abs], axis=1)
+                z_avg_gated_abs = self.lufs_i_z_sum_gated_abs / self.lufs_i_num_gated_blocks_abs
 
             # calculate the relative threshold value (see eq. 6)
             gamma_rel = self.linear2lufs(np.sum([self.ch_gains[i] * z_avg_gated_abs[i] for i in range(num_channels)])) - 10.0
             # find gating block indices above relative and absolute thresholds  (end of eq. 7)
             j_gated = np.argwhere((lufs_blocks > gamma_rel) & (lufs_blocks > self.gamma_abs)).flatten()
             if len(j_gated) > 0:
-                self.lufs_num_gated_blocks += len(j_gated)
+                self.lufs_i_num_gated_blocks += len(j_gated)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", category=RuntimeWarning)
                     # calculate the average of z[i,j] as show in eq. 7 with blocks above both thresholds
-                    if self.z_sum_gated is None:
-                        self.z_sum_gated = np.sum(z[:,j_gated], axis=1)
+                    if self.lufs_i_z_sum_gated is None:
+                        self.lufs_i_z_sum_gated = np.sum(z[:,j_gated], axis=1)
                     else:
-                        self.z_sum_gated += np.sum(z[:,j_gated], axis=1)
-                    z_avg_gated = self.z_sum_gated / self.lufs_num_gated_blocks
+                        self.lufs_i_z_sum_gated += np.sum(z[:,j_gated], axis=1)
+                    z_avg_gated = self.lufs_i_z_sum_gated / self.lufs_i_num_gated_blocks
                 # calculate final loudness gated loudness (see eq. 7)
                 with np.errstate(divide='ignore'):
                     lufs_integrated = self.linear2lufs(np.sum([self.ch_gains[i] * z_avg_gated[i] for i in range(num_channels)]))
@@ -149,36 +173,48 @@ class Meter(object):
         """
         input_data = self.filter_input(data)
 
-        if self.buffer_data is None:
-            self.buffer_data = input_data
-        else:
-            self.buffer_data = np.append(self.buffer_data, input_data, axis=0)
-
         t_block = self.block_size # 400 ms gating block standard
-        t_data = self.buffer_data.shape[0] / self.rate # length of the input in seconds
 
-        if t_data >= t_block:
-            z = self.calc_z(self.buffer_data) # calculate the mean square of the filtered signal for each block
+        self.lufs_i_buffer = input_data if self.lufs_i_buffer is None else np.append(self.lufs_i_buffer, input_data, axis=0)
+        t_lufs_i_buffer = self.lufs_i_buffer.shape[0] / self.rate # length of the lufs_i buffer in seconds
+
+        if t_lufs_i_buffer >= t_block:
+            z = self.calc_z(self.lufs_i_buffer) # calculate the mean square of the filtered signal for each block
             (_, num_blocks) = z.shape
             lufs_blocks = self.calc_lufs_blocks(z) # calculate the loudness for each block (see eq. 4)
-            # In theory we should only have one block per step. If not, we take the average
-            lufs_momentary = np.mean(lufs_blocks)
-            self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
+            self.lufs_i = self.gate_loudness(z, lufs_blocks)
             # advance buffer
-            self.buffer_data = self.buffer_data[int(num_blocks * t_block * self.step * self.rate):,:]
+            self.lufs_i_buffer = self.lufs_i_buffer[int(num_blocks * t_block * self.step * self.rate):,:]
         else:
             # Add trailing zeros to the input data to make it a full 0.4s block
-            trailing_zeros = np.zeros(shape=(int(self.block_size * self.rate) - self.buffer_data.shape[0], self.buffer_data.shape[1]))
-            input_data = np.append(trailing_zeros, self.buffer_data, axis=0)
+            trailing_zeros = np.zeros(shape=(int(self.block_size * self.rate) - self.lufs_i_buffer.shape[0], self.lufs_i_buffer.shape[1]))
+            input_data = np.append(trailing_zeros, self.lufs_i_buffer, axis=0)
             z = self.calc_z(input_data) # calculate the mean square of the filtered signal for each block
             (_, num_blocks) = z.shape
             lufs_blocks = self.calc_lufs_blocks(z) # calculate the loudness for each block (see eq. 4)
-            # Keeping the mean calculation for consistency, though here we surely only have one block
-            lufs_momentary = np.mean(lufs_blocks)
             # Integrated loudness left out if the block is not full
 
+        # Momentary loudness
+        # In theory we should only have one block per step. If not, we take the average
+        lufs_momentary = np.mean(lufs_blocks)
+        
+        # Short-term loudness
+        # We use the last 3 seconds of audio to calculate the short-term loudness
+        # TODO: this can be optimized
+        self.lufs_s_buffer = input_data if self.lufs_s_buffer is None else np.append(self.lufs_s_buffer, input_data, axis=0)
+        if len(self.lufs_s_buffer) >= self.lufs_s_num_samples:
+            self.lufs_s_buffer = self.lufs_s_buffer[-self.lufs_s_num_samples:,:]
+            input_data = self.lufs_s_buffer
+        else:
+            # Add trailing zeros to the input data to make it a full 3s block
+            trailing_zeros = np.zeros(shape=(int(self.lufs_s_num_samples - self.lufs_s_buffer.shape[0]), self.lufs_s_buffer.shape[1]))
+            input_data = np.append(trailing_zeros, self.lufs_s_buffer, axis=0)
+        z_s = self.calc_z_one_block(input_data) # calculate the mean square of the filtered signal as a single block
+        lufs_blocks_s = self.calc_lufs_blocks(z_s)
+        self.lufs_s = np.mean(lufs_blocks_s)
 
-        return (self.lufs_integrated, lufs_momentary)
+
+        return (self.lufs_i, lufs_momentary, self.lufs_s)
 
     def integrated_loudness(self, data):
         """ Measure the integrated gated loudness of a signal.
@@ -210,9 +246,9 @@ class Meter(object):
         input_data = self.filter_input(data)
         z = self.calc_z(input_data) # calculate the mean square of the filtered signal for each block
         lufs_blocks = self.calc_lufs_blocks(z) # calculate the loudness for each block (see eq. 4)
-        self.lufs_integrated = self.gate_loudness(z, lufs_blocks)
+        self.lufs_i = self.gate_loudness(z, lufs_blocks)
 
-        return self.lufs_integrated
+        return self.lufs_i
 
     @property
     def filter_class(self):
