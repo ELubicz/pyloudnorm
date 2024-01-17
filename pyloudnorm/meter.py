@@ -37,7 +37,6 @@ class Meter:
         self.lufs_i_blocks = None
         self.lufs_i_z = None
         # short loudness
-        self.lufs_s = -np.inf
         self.lufs_s_num_samples = 3 * self.rate  # 3 seconds of audio
         self.lufs_s_buffer = None
 
@@ -241,7 +240,7 @@ class Meter:
 
         # Momentary loudness
         # In theory we should only have one block per step. If not, we take the average
-        lufs_momentary = np.mean(lufs_blocks)
+        lufs_m = np.mean(lufs_blocks)
 
         # Short-term loudness
         # We use the last 3 seconds of audio to calculate the short-term loudness
@@ -266,9 +265,9 @@ class Meter:
         # calculate the mean square of the filtered signal as a single block
         z_s = self.calc_z_one_block(lufs_s_buffer)
         lufs_blocks_s = self.calc_lufs_blocks(z_s)
-        self.lufs_s = np.mean(lufs_blocks_s)
+        lufs_s = np.mean(lufs_blocks_s)
 
-        return (lufs_i, lufs_momentary, self.lufs_s)
+        return (lufs_i, lufs_m, lufs_s)
 
     def integrated_loudness(self, data):
         """Measure the integrated gated loudness of a signal.
