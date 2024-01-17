@@ -9,10 +9,12 @@ def compare_lufs(lufs, filename):
     #np.savetxt(str(data_dir / ("R_" + filename + ".txt")), lufs, fmt='%.1f')
     np.loadtxt(str(data_dir / ("R_" + filename + ".txt")))
     data_ref = np.loadtxt(str(data_dir / ("R_" + filename + ".txt")))
-    # Compare LUFS_I
-    assert np.isclose(data_ref[:,0], lufs[:,0], atol=0.1).all()
+    # Compare LUFS_S
+    assert np.isclose(data_ref[:,2], lufs[:,2], atol=0.1).all()
     # Compare LUFS_M
     assert np.isclose(data_ref[:,1], lufs[:,1], atol=0.1).all()
+    # Compare LUFS_I
+    assert np.isclose(data_ref[:,0], lufs[:,0], atol=0.1).all()
 
 def calc_loudness_rt(data, rate, block_size_rt=0.1):
     meter = pyln.Meter(rate)
@@ -66,7 +68,7 @@ def test_rel_gate_test():
 
     target_loudness = -10.0
     assert np.isclose(target_loudness, loudness, atol=0.1)
-    #assert np.isclose(target_loudness, lufs[-1][0], atol=0.1)
+    assert np.isclose(target_loudness, lufs[-1][0], atol=0.1)
 
 
 def test_abs_gate_test():
@@ -231,7 +233,7 @@ def test_conf_stereo_vinL_R_23LKFS():
     compare_lufs(lufs, "1770-2_Conf_Stereo_VinL+R-23LKFS")
     target_loudness = -23.0
     assert np.isclose(target_loudness, loudness, atol=0.1)
-    #assert np.isclose(target_loudness, lufs[-1][0], atol=0.1)
+    assert np.isclose(target_loudness, lufs[-1][0], atol=0.1)
 
 
 def test_conf_monovoice_music_24LKFS():
@@ -239,11 +241,10 @@ def test_conf_monovoice_music_24LKFS():
     meter = pyln.Meter(rate)
     loudness = meter.integrated_loudness(data)
     lufs = calc_loudness_rt(data, rate)
-    np.savetxt(str(data_dir / ("R_" + "1770-2_Conf_Mono_Voice+Music-24LKFS" + ".txt")), lufs, fmt='%.1f')
     compare_lufs(lufs, "1770-2_Conf_Mono_Voice+Music-24LKFS")
     target_loudness = -24.0
     assert np.isclose(target_loudness, loudness, atol=0.1)
-    #assert np.isclose(target_loudness, lufs[-1][0], atol=0.1)
+    assert np.isclose(target_loudness, lufs[-1][0], atol=0.1)
 
 
 def test_conf_monovoice_music_23LKFS():
@@ -255,4 +256,4 @@ def test_conf_monovoice_music_23LKFS():
     target_loudness = -23.0
     assert np.isclose(target_loudness, loudness, atol=0.1)
     # TODO: check this
-    #assert np.isclose(target_loudness, lufs[-1][0])
+    assert np.isclose(target_loudness, lufs[-1][0], atol=0.1)
