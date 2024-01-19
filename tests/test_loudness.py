@@ -5,32 +5,39 @@ import pyloudnorm as pyln
 
 data_dir = Path(__file__).parent / "data"
 
+
 def compare_lufs(lufs, filename):
-    #np.savetxt(str(data_dir / ("R_" + filename + ".txt")), lufs, fmt='%.1f')
-    np.loadtxt(str(data_dir / ("R_" + filename + ".txt")))
+    # np.savetxt(str(data_dir / ("R_" + filename + ".txt")), lufs, fmt='%.1f')
     data_ref = np.loadtxt(str(data_dir / ("R_" + filename + ".txt")))
     # Compare LUFS_S
-    assert np.isclose(data_ref[:,2], lufs[:,2], atol=0.1).all()
+    assert np.isclose(data_ref[:, 2], lufs[:, 2], atol=0.1).all()
     # Compare LUFS_M
-    assert np.isclose(data_ref[:,1], lufs[:,1], atol=0.1).all()
+    assert np.isclose(data_ref[:, 1], lufs[:, 1], atol=0.1).all()
     # Compare LUFS_I
-    assert np.isclose(data_ref[:,0], lufs[:,0], atol=0.1).all()
+    assert np.isclose(data_ref[:, 0], lufs[:, 0], atol=0.1).all()
 
-def calc_loudness_rt(data, rate, block_size_rt=0.1):
-    meter = pyln.Meter(rate)
+
+def calc_loudness_rt(data, rate, meter=None, block_size_rt=0.1):
+    if meter is None:
+        meter = pyln.Meter(rate)
     bsrt_samples = int(np.round(block_size_rt * rate))
     num_blocks = np.floor(data.shape[0] / bsrt_samples)
     if data.ndim == 1:
-        data_rt = np.reshape(data[:int(num_blocks*bsrt_samples)], (-1, bsrt_samples, 1))
+        data_rt = np.reshape(
+            data[: int(num_blocks * bsrt_samples)], (-1, bsrt_samples, 1)
+        )
     else:
         num_ch = data.shape[1]
-        data_rt = np.reshape(data[:int(num_blocks*bsrt_samples),:], (-1, bsrt_samples, num_ch))
+        data_rt = np.reshape(
+            data[: int(num_blocks * bsrt_samples), :], (-1, bsrt_samples, num_ch)
+        )
     # create an empty LUFS array
     lufs = np.zeros((data_rt.shape[0], 3))
     for i, block in enumerate(data_rt):
         (lufs_i, lufs_m, lufs_s) = meter.step_loudness(block)
-        lufs[i,:] = [lufs_i, lufs_m, lufs_s]
+        lufs[i, :] = [lufs_i, lufs_m, lufs_s]
     return lufs
+
 
 def test_integrated_loudness():
     data, rate = sf.read(str(data_dir / "sine_1000.wav"))
@@ -255,5 +262,22 @@ def test_conf_monovoice_music_23LKFS():
     compare_lufs(lufs, "1770-2_Conf_Mono_Voice+Music-23LKFS")
     target_loudness = -23.0
     assert np.isclose(target_loudness, loudness, atol=0.1)
-    # TODO: check this
     assert np.isclose(target_loudness, lufs[-1][0], atol=0.1)
+
+
+def test_enable_flags():
+    filename = "1770-2_Conf_Mono_Voice+Music-23LKFS"
+    data_ref = np.loadtxt(str(data_dir / ("R_" + filename + ".txt")))
+    data, rate = sf.read(str(data_dir / (filename + ".wav")))
+    # First with LUFS_I disabled
+    meter = pyln.Meter(rate, en_lufs_i=False)
+    lufs = calc_loudness_rt(data, rate, meter)
+    assert np.isclose(data_ref[:, 2], lufs[:, 2], atol=0.1).all()
+    assert np.isclose(data_ref[:, 1], lufs[:, 1], atol=0.1).all()
+    assert np.isclose(-70.0, lufs[:, 0], atol=0.1).all()
+    # Now with LUFS_S disabled
+    meter = pyln.Meter(rate, en_lufs_s=False)
+    lufs = calc_loudness_rt(data, rate, meter)
+    assert np.isclose(-np.inf, lufs[:, 2], atol=0.1).all()
+    assert np.isclose(data_ref[:, 1], lufs[:, 1], atol=0.1).all()
+    assert np.isclose(data_ref[:, 0], lufs[:, 0], atol=0.1).all()
