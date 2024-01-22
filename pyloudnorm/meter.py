@@ -28,23 +28,24 @@ class Meter:
         self,
         rate,
         filter_class="K-weighting",
-        block_size=0.400,
+        lufs_i_window_time=0.400,
+        lufs_s_window_time=3.0,
         en_lufs_i=True,
         en_lufs_s=True,
     ):
         self.rate = rate
         self.filter_class = filter_class
-        self.block_size = block_size
+        self.lufs_i_window_time = lufs_i_window_time
         self.ch_gains = [1.0, 1.0, 1.0, 1.41, 1.41]  # 5 channel gains
-        self.overlap = 0.75  # overlap of 75% of the block duration
-        self.step = 1.0 - self.overlap  # step size by percentage
+        self.lufs_i_overlap = 0.75  # overlap of 75% of the block duration
+        self.lufs_step = 1.0 - self.lufs_i_overlap  # step size by percentage
         # integrated loudness
         self.lufs_i_gamma_abs = -70.0  # -70 LKFS = absolute loudness threshold
         self.lufs_buffer = None
         self.lufs_i_blocks = None
         self.lufs_i_z = None
         # short loudness
-        self.lufs_s_num_samples = 3 * self.rate  # 3 seconds of audio
+        self.lufs_s_num_samples = int(lufs_s_window_time * self.rate)
         self.lufs_s_buffer = None
         # enable flags
         self.en_lufs_i = en_lufs_i
@@ -88,7 +89,13 @@ class Meter:
         t_data = data.shape[0] / self.rate  # length of the input in seconds
         # Total number of gated blocks (see end of eq. 3)
         num_blocks = int(
-            np.round(((t_data - self.block_size) / (self.block_size * self.step))) + 1
+            np.round(
+                (
+                    (t_data - self.lufs_i_window_time)
+                    / (self.lufs_i_window_time * self.lufs_step)
+                )
+            )
+            + 1
         )
         j_range = np.arange(0, num_blocks)  # indexed list of total blocks
         z = np.zeros(shape=(num_channels, num_blocks))  # instantiate array
@@ -96,8 +103,12 @@ class Meter:
         for i in range(num_channels):  # iterate over input channels
             for j in j_range:  # iterate over total frames
                 # lower and upper bounds of integration (in samples)
-                lower_ind = int(self.block_size * (j * self.step) * self.rate)
-                upper_ind = int(self.block_size * (j * self.step + 1) * self.rate)
+                lower_ind = int(
+                    self.lufs_i_window_time * (j * self.lufs_step) * self.rate
+                )
+                upper_ind = int(
+                    self.lufs_i_window_time * (j * self.lufs_step + 1) * self.rate
+                )
                 # calculate mean square of the filtered for each block (see eq. 1)
                 z[i, j] = np.mean(np.square(data[lower_ind:upper_ind, i]))
         return z
@@ -200,7 +211,7 @@ class Meter:
         """
         input_data = self.filter_input(data)
 
-        t_block = self.block_size  # 400 ms gating block standard
+        t_block = self.lufs_i_window_time  # 400 ms gating block standard
 
         self.lufs_buffer = (
             input_data
@@ -221,7 +232,7 @@ class Meter:
             lufs_blocks = self.calc_lufs_blocks(z)
             # advance buffer
             self.lufs_buffer = self.lufs_buffer[
-                int(num_blocks * t_block * self.step * self.rate) :, :
+                int(num_blocks * t_block * self.lufs_step * self.rate) :, :
             ]
             # calculation for lufs_i
             if self.en_lufs_i:
@@ -240,7 +251,8 @@ class Meter:
             # Add trailing zeros to the input data to make it a full 0.4s block
             trailing_zeros = np.zeros(
                 shape=(
-                    int(self.block_size * self.rate) - self.lufs_buffer.shape[0],
+                    int(self.lufs_i_window_time * self.rate)
+                    - self.lufs_buffer.shape[0],
                     self.lufs_buffer.shape[1],
                 )
             )
@@ -306,7 +318,7 @@ class Meter:
         LUFS : float
             Integrated gated loudness of the input measured in dB LUFS.
         """
-        util.valid_audio(data, self.rate, self.block_size)
+        util.valid_audio(data, self.rate, self.lufs_i_window_time)
 
         # integrated_loudness() in performed in the entire data array all at once,
         # hence we should reset all internal states before processing, in case we already
