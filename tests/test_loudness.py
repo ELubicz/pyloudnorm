@@ -281,3 +281,21 @@ def test_enable_flags():
     assert np.isclose(-np.inf, lufs[:, 2], atol=0.1).all()
     assert np.isclose(data_ref[:, 1], lufs[:, 1], atol=0.1).all()
     assert np.isclose(data_ref[:, 0], lufs[:, 0], atol=0.1).all()
+
+def test_lufs_m_no_moving_average():
+    filename = "1770-2_Conf_Mono_Voice+Music-23LKFS"
+    ref_file = str(data_dir / ("R_" + filename + "_no_moving_average.txt"))
+    data_ref = np.loadtxt(ref_file)
+    data, rate = sf.read(str(data_dir / (filename + ".wav")))
+    # First with window time the same as the block size
+    meter = pyln.Meter(rate, en_lufs_i=False, en_lufs_s=False, lufs_m_window_time=0.1)
+    lufs = calc_loudness_rt(data, rate, meter)
+    assert np.isclose(-np.inf, lufs[:, 2], atol=0.1).all()
+    assert np.isclose(data_ref[:, 1], lufs[:, 1], atol=0.1).all()
+    assert np.isclose(-70.0, lufs[:, 0], atol=0.1).all()
+    # Now with the window time less than the block size
+    meter = pyln.Meter(rate, en_lufs_i=False, en_lufs_s=False, lufs_m_window_time=64.0/48000.0)
+    lufs = calc_loudness_rt(data, rate, meter)
+    assert np.isclose(-np.inf, lufs[:, 2], atol=0.1).all()
+    assert np.isclose(data_ref[:, 1], lufs[:, 1], atol=0.1).all()
+    assert np.isclose(-70.0, lufs[:, 0], atol=0.1).all()

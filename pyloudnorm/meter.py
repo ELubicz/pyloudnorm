@@ -211,28 +211,33 @@ class Meter:
 
     def calc_moving_average_lufs(self, buffer, data, num_samples):
         """
-        Calculate the moving average of "num_samples" of the given buffer, 
+        Calculate the moving average of "num_samples" of the given buffer,
         after appending the new "data" to it.
         :param buffer: ndarray of shape (samples, ch). Buffer to calculate the moving average from.
         :param data: ndarray of shape (samples, ch). Incoming data, to be appended to the buffer.
         :param num_samples: int, number of samples to calculate the moving average.
-        :return: (LUFS: float, buffer: ndarray). Respectively the averaged loudness of the buffer, 
+        :return: (LUFS: float, buffer: ndarray). Respectively the averaged loudness of the buffer,
                  measured in dB LUFS and the buffer with the new data appended
         """
-        # TODO: this can be optimized
-        buffer = data if buffer is None else np.append(buffer, data, axis=0)
-        if len(buffer) >= num_samples:
-            buffer = buffer[-num_samples:, :]
-            lufs_buffer = buffer
+        if num_samples <= data.shape[0]:
+            # if the moving average time is less than the data block size, we return the LUFS
+            # for the input block, un-averaged
+            lufs_buffer = data
         else:
-            # Add trailing zeros to the input data to make it a full 3s block
-            trailing_zeros = np.zeros(
-                shape=(
-                    int(num_samples - buffer.shape[0]),
-                    buffer.shape[1],
+            # TODO: this can be optimized
+            buffer = data if buffer is None else np.append(buffer, data, axis=0)
+            if len(buffer) >= num_samples:
+                buffer = buffer[-num_samples:, :]
+                lufs_buffer = buffer
+            else:
+                # Add trailing zeros to the input data to make it a full 3s block
+                trailing_zeros = np.zeros(
+                    shape=(
+                        int(num_samples - buffer.shape[0]),
+                        buffer.shape[1],
+                    )
                 )
-            )
-            lufs_buffer = np.append(trailing_zeros, buffer, axis=0)
+                lufs_buffer = np.append(trailing_zeros, buffer, axis=0)
         # calculate the mean square of the filtered signal as a single block
         z = self.calc_z_one_block(lufs_buffer)
         lufs_blocks_s = self.calc_lufs_blocks(z)
