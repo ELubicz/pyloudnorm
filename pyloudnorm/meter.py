@@ -30,6 +30,7 @@ class Meter:
         filter_class="K-weighting",
         lufs_i_window_time=0.400,
         lufs_s_window_time=3.0,
+        lufs_m_window_time=0.4,
         en_lufs_i=True,
         en_lufs_s=True,
     ):
@@ -41,12 +42,15 @@ class Meter:
         self.lufs_step = 1.0 - self.lufs_i_overlap  # step size by percentage
         # integrated loudness
         self.lufs_i_gamma_abs = -70.0  # -70 LKFS = absolute loudness threshold
-        self.lufs_buffer = None
+        self.lufs_i_buffer = None
         self.lufs_i_blocks = None
         self.lufs_i_z = None
         # short loudness
         self.lufs_s_num_samples = int(lufs_s_window_time * self.rate)
         self.lufs_s_buffer = None
+        # momentary loudness
+        self.lufs_m_num_samples = int(lufs_m_window_time * self.rate)
+        self.lufs_m_buffer = None
         # enable flags
         self.en_lufs_i = en_lufs_i
         self.en_lufs_s = en_lufs_s
@@ -55,9 +59,11 @@ class Meter:
         """
         Reset the meter to its initial state.
         """
-        self.lufs_buffer = None
+        self.lufs_i_buffer = None
         self.lufs_i_blocks = None
         self.lufs_i_z = None
+        self.lufs_s_buffer = None
+        self.lufs_m_buffer = None
         # reset filter states
         for filter_ch in self._filters:
             for _, filter_stage in filter_ch.items():
@@ -203,6 +209,37 @@ class Meter:
 
         return input_data
 
+    def calc_moving_average_lufs(self, buffer, data, num_samples):
+        """
+        Calculate the moving average of "num_samples" of the given buffer, 
+        after appending the new "data" to it.
+        :param buffer: ndarray of shape (samples, ch). Buffer to calculate the moving average from.
+        :param data: ndarray of shape (samples, ch). Incoming data, to be appended to the buffer.
+        :param num_samples: int, number of samples to calculate the moving average.
+        :return: (LUFS: float, buffer: ndarray). Respectively the averaged loudness of the buffer, 
+                 measured in dB LUFS and the buffer with the new data appended
+        """
+        # TODO: this can be optimized
+        buffer = data if buffer is None else np.append(buffer, data, axis=0)
+        if len(buffer) >= num_samples:
+            buffer = buffer[-num_samples:, :]
+            lufs_buffer = buffer
+        else:
+            # Add trailing zeros to the input data to make it a full 3s block
+            trailing_zeros = np.zeros(
+                shape=(
+                    int(num_samples - buffer.shape[0]),
+                    buffer.shape[1],
+                )
+            )
+            lufs_buffer = np.append(trailing_zeros, buffer, axis=0)
+        # calculate the mean square of the filtered signal as a single block
+        z = self.calc_z_one_block(lufs_buffer)
+        lufs_blocks_s = self.calc_lufs_blocks(z)
+        lufs = np.mean(lufs_blocks_s)
+
+        return (lufs, buffer)
+
     def step_loudness(self, data):
         """
         Measure the integrated gated loudness of a signal, block by block, in RT.
@@ -211,31 +248,34 @@ class Meter:
         """
         input_data = self.filter_input(data)
 
-        t_block = self.lufs_i_window_time  # 400 ms gating block standard
-
-        self.lufs_buffer = (
-            input_data
-            if self.lufs_buffer is None
-            else np.append(self.lufs_buffer, input_data, axis=0)
-        )
-        # length of the lufs_i buffer in seconds
-        t_lufs_buffer = self.lufs_buffer.shape[0] / self.rate
-
         # Initialize integrated loudness to its minimum value
         lufs_i = self.lufs_i_gamma_abs
+        # calculation for lufs_i
+        if self.en_lufs_i:
+            self.lufs_i_buffer = (
+                input_data
+                if self.lufs_i_buffer is None
+                else np.append(self.lufs_i_buffer, input_data, axis=0)
+            )
+            # length of the lufs_i buffer in seconds
+            t_lufs_i_buffer = self.lufs_i_buffer.shape[0] / self.rate
 
-        if t_lufs_buffer >= t_block:
-            # calculate the mean square of the filtered signal for each block
-            z = self.calc_z(self.lufs_buffer)
-            (_, num_blocks) = z.shape
-            # calculate the loudness for each block (see eq. 4)
-            lufs_blocks = self.calc_lufs_blocks(z)
-            # advance buffer
-            self.lufs_buffer = self.lufs_buffer[
-                int(num_blocks * t_block * self.lufs_step * self.rate) :, :
-            ]
-            # calculation for lufs_i
-            if self.en_lufs_i:
+            if t_lufs_i_buffer >= self.lufs_i_window_time:
+                # calculate the mean square of the filtered signal for each block
+                z = self.calc_z(self.lufs_i_buffer)
+                (_, num_blocks) = z.shape
+                # calculate the loudness for each block (see eq. 4)
+                lufs_blocks = self.calc_lufs_blocks(z)
+                # advance buffer
+                self.lufs_i_buffer = self.lufs_i_buffer[
+                    int(
+                        num_blocks
+                        * self.lufs_i_window_time
+                        * self.lufs_step
+                        * self.rate
+                    ) :,
+                    :,
+                ]
                 self.lufs_i_z = (
                     z if self.lufs_i_z is None else np.append(self.lufs_i_z, z, axis=1)
                 )
@@ -247,51 +287,33 @@ class Meter:
                 # TODO: I can't think of any way to do this without it increasing in
                 # memory and CPU for every block appended
                 lufs_i = self.gate_loudness(self.lufs_i_z, self.lufs_i_blocks)
-        else:
-            # Add trailing zeros to the input data to make it a full 0.4s block
-            trailing_zeros = np.zeros(
-                shape=(
-                    int(self.lufs_i_window_time * self.rate)
-                    - self.lufs_buffer.shape[0],
-                    self.lufs_buffer.shape[1],
+            else:
+                # Add trailing zeros to the input data to make it a full 0.4s block
+                trailing_zeros = np.zeros(
+                    shape=(
+                        int(self.lufs_i_window_time * self.rate)
+                        - self.lufs_i_buffer.shape[0],
+                        self.lufs_i_buffer.shape[1],
+                    )
                 )
-            )
-            lufs_buffer = np.append(trailing_zeros, self.lufs_buffer, axis=0)
-            # calculate the mean square of the filtered signal for each block
-            z = self.calc_z(lufs_buffer)
-            (_, num_blocks) = z.shape
-            # calculate the loudness for each block (see eq. 4)
-            lufs_blocks = self.calc_lufs_blocks(z)
+                lufs_buffer = np.append(trailing_zeros, self.lufs_i_buffer, axis=0)
+                # calculate the mean square of the filtered signal for each block
+                z = self.calc_z(lufs_buffer)
+                (_, num_blocks) = z.shape
+                # calculate the loudness for each block (see eq. 4)
+                lufs_blocks = self.calc_lufs_blocks(z)
 
         # Momentary loudness
-        # In theory we should only have one block per step. If not, we take the average
-        lufs_m = np.mean(lufs_blocks)
+        (lufs_m, self.lufs_m_buffer) = self.calc_moving_average_lufs(
+            self.lufs_m_buffer, input_data, self.lufs_m_num_samples
+        )
 
         # Short-term loudness
         if self.en_lufs_s:
             # We use the last 3 seconds of audio to calculate the short-term loudness
-            # TODO: this can be optimized
-            self.lufs_s_buffer = (
-                input_data
-                if self.lufs_s_buffer is None
-                else np.append(self.lufs_s_buffer, input_data, axis=0)
+            (lufs_s, self.lufs_s_buffer) = self.calc_moving_average_lufs(
+                self.lufs_s_buffer, input_data, self.lufs_s_num_samples
             )
-            if len(self.lufs_s_buffer) >= self.lufs_s_num_samples:
-                self.lufs_s_buffer = self.lufs_s_buffer[-self.lufs_s_num_samples :, :]
-                lufs_s_buffer = self.lufs_s_buffer
-            else:
-                # Add trailing zeros to the input data to make it a full 3s block
-                trailing_zeros = np.zeros(
-                    shape=(
-                        int(self.lufs_s_num_samples - self.lufs_s_buffer.shape[0]),
-                        self.lufs_s_buffer.shape[1],
-                    )
-                )
-                lufs_s_buffer = np.append(trailing_zeros, self.lufs_s_buffer, axis=0)
-            # calculate the mean square of the filtered signal as a single block
-            z_s = self.calc_z_one_block(lufs_s_buffer)
-            lufs_blocks_s = self.calc_lufs_blocks(z_s)
-            lufs_s = np.mean(lufs_blocks_s)
         else:
             lufs_s = -np.inf
 
